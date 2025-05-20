@@ -2,6 +2,7 @@ import pygame
 import sys
 import random
 import os
+from bird_manager import BirdManager
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -26,12 +27,37 @@ pygame.display.set_caption('Flappy Bird')
 clock = pygame.time.Clock()
 
 # Game Difficulty Settings
-pipe_move_speed = 3         # Speed at which pipes move left
-pipe_spawn_interval = 1500  # Milliseconds between pipe spawns (e.g., 1200 for harder, 1800 for easier)
-pipe_gap_size = 150         # Vertical gap between pipe pairs (e.g., 100 for harder, 200 for easier)
+pipe_move_speed = 2         # Reduced from 3 to 2 for better pacing
+pipe_spawn_interval = 1800  # Increased from 1500 to 1800 for more spacing
+pipe_gap_size = 150         # Keep the same gap size
 
 # High Score File
 high_score_file = "highscore.txt"
+
+# Initialize bird manager
+bird_manager = BirdManager()
+
+# Game state
+game_state = 'start_screen'  # 'start_screen', 'bird_select', 'game_active', 'game_over'
+selected_bird_type = 'blue'
+score = 0
+high_score = 0
+coin_count = 0 # Initialize coin count
+pipes_passed_count = 0 # Track pipes passed for difficulty
+
+# UI Settings
+UI_PADDING = 20
+UI_SPACING = 30
+
+# Font setup
+font = pygame.font.Font(None, 36)
+small_font = pygame.font.Font(None, 24)
+
+# Background scroll speed (keep global as it's a constant)
+background_scroll_speed = 0.5
+
+# Timer for spawning pipes (defined globally)
+PIPE_SPAWN_EVENT = pygame.USEREVENT # Define PIPE_SPAWN_EVENT globally
 
 # Function to load high score
 def load_high_score():
@@ -40,15 +66,18 @@ def load_high_score():
             score_val = int(f.read())
             return score_val
     except (IOError, ValueError):
-        return 0 # File not found or invalid content, default to 0
+        return 0
 
 # Function to save high score
-def save_high_score(score_to_save):
+def save_high_score(score_val):
     try:
         with open(high_score_file, 'w') as f:
-            f.write(str(score_to_save))
+            f.write(str(score_val))
     except IOError:
-        print(f"Error: Could not save high score to {high_score_file}")
+        print("Error saving high score")
+
+# Load high score
+high_score = load_high_score()
 
 # Load Sounds
 try:
@@ -56,10 +85,9 @@ try:
     sound_point = pygame.mixer.Sound(resource_path('assets/audio/point.ogg'))
     sound_hit = pygame.mixer.Sound(resource_path('assets/audio/hit.ogg'))
     sound_die = pygame.mixer.Sound(resource_path('assets/audio/die.ogg'))
-    sound_swoosh = pygame.mixer.Sound(resource_path('assets/audio/swoosh.ogg')) # Optional swoosh sound
+    sound_swoosh = pygame.mixer.Sound(resource_path('assets/audio/swoosh.ogg'))
 except pygame.error as e:
     print(f"Error loading sound(s): {e}. Sound effects will be disabled.")
-    # Create dummy sound objects if loading fails, so game doesn't crash
     class DummySound:
         def play(self):
             pass
@@ -117,55 +145,128 @@ except pygame.error as e:
     print(f"Error loading gameover.png: {e}. Game over image will not be shown.")
     game_over_image = None
 
+# Load coin image (sprite sheet)
+try:
+    # Assuming coin animation frames are 20x20 pixels and laid out horizontally (updated)
+    coin_sprite_sheet = pygame.image.load(resource_path('assets/sprites/Coin_One.png')).convert_alpha()
+    coin_frame_width = 20 # Assumed frame width (changed back to 20)
+    coin_frame_height = 20 # Assumed frame height (changed back to 20)
+    # Calculate the number of frames based on sprite sheet width
+    num_coin_frames = coin_sprite_sheet.get_width() // coin_frame_width
+    # Extract frames
+    coin_frames = []
+    for i in range(num_coin_frames):
+        frame = coin_sprite_sheet.subsurface((i * coin_frame_width, 0, coin_frame_width, coin_frame_height))
+        coin_frames.append(frame)
+
+except pygame.error as e:
+    print(f"Error loading coin sprite sheet: {e}. Using a placeholder.")
+    coin_sprite_sheet = None
+    coin_frames = None # Use None to indicate no animation frames loaded
+    coin_frame_width = 20 # Match placeholder size
+    coin_frame_height = 20 # Match placeholder size
+
+except FileNotFoundError:
+    print("Coin_One.png not found. Using a placeholder.")
+    coin_sprite_sheet = None
+    coin_frames = None
+    coin_frame_width = 20 # Match placeholder size
+    coin_frame_height = 20 # Match placeholder size
+
 # Bird class
 class Bird(pygame.sprite.Sprite):
-    def __init__(self):
+    def __init__(self, bird_type='default'):
         super().__init__()
-        self.frames = bird_frames
+        self.bird_type = bird_type
+        self.frames = self._load_bird_frames()
         self.frame_index = 0
-        self.animation_speed = 0.15 # How fast the animation plays
+        self.animation_speed = 0.15
         self.animation_timer = 0
 
         if self.frames:
             self.image = self.frames[self.frame_index]
-        else: # Placeholder if no images loaded
-            self.image = pygame.Surface([34, 24]) # Placeholder size
-            self.image.fill((255, 255, 0)) # Yellow color for placeholder
-            # Create a dummy frames list with the placeholder for consistency if needed elsewhere
+        else:
+            self.image = pygame.Surface([34, 24])
+            self.image.fill((255, 255, 0))
             self.frames = [self.image, self.image, self.image]
         
         self.rect = self.image.get_rect(center=(50, screen_height // 2))
         self.velocity = 0
-        self.gravity = 0.25 # Adjusted for a more flappy feel
-        self.flap_strength = -6 # Adjusted for a more flappy feel
+        self.gravity = 0.25
+        self.flap_strength = -6
+        self.horizontal_speed = 0
+
+        self._apply_bird_type_attributes()
+
+    def _load_bird_frames(self):
+        try:
+            if self.bird_type == 'red':
+                return [
+                    pygame.image.load(resource_path('assets/sprites/redbird-downflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/redbird-midflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/redbird-upflap.png')).convert_alpha()
+                ]
+            elif self.bird_type == 'yellow':
+                return [
+                    pygame.image.load(resource_path('assets/sprites/yellowbird-downflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/yellowbird-midflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/yellowbird-upflap.png')).convert_alpha()
+                ]
+            elif self.bird_type == 'blue':
+                return [
+                    pygame.image.load(resource_path('assets/sprites/bluebird-downflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/bluebird-midflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/bluebird-upflap.png')).convert_alpha()
+                ]
+            else:  # default bird (will be removed later)
+                 return [
+                    pygame.image.load(resource_path('assets/sprites/bluebird-downflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/bluebird-midflap.png')).convert_alpha(),
+                    pygame.image.load(resource_path('assets/sprites/bluebird-upflap.png')).convert_alpha()
+                ]
+        except pygame.error as e:
+            print(f"Error loading bird frames: {e}")
+            return None
+
+    def _apply_bird_type_attributes(self):
+        if self.bird_type == 'red':
+            self.horizontal_speed = 0.8
+            self.gravity = 0.25
+            self.flap_strength = -6
+        elif self.bird_type == 'yellow':
+            self.horizontal_speed = 0
+            self.gravity = 0.35
+            self.flap_strength = -8
+        elif self.bird_type == 'blue':
+            self.horizontal_speed = 0
+            self.gravity = 0.15
+            self.flap_strength = -6
 
     def update(self):
-        # Animate bird
-        if self.frames and len(self.frames) > 1: # Only animate if multiple frames exist
+        if self.frames and len(self.frames) > 1:
             self.animation_timer += self.animation_speed
             if self.animation_timer >= 1:
                 self.frame_index = (self.frame_index + 1) % len(self.frames)
                 self.image = self.frames[self.frame_index]
                 self.animation_timer = 0
         
-        # Bird movement
         self.velocity += self.gravity
-        self.rect.y += int(self.velocity) # Convert to int for pixel position
+        self.rect.y += int(self.velocity)
+        
+        if self.rect.x < 50:
+            self.rect.x += 1
+        elif self.horizontal_speed != 0:
+            self.rect.x += int(self.horizontal_speed)
 
-        # Keep bird on screen (optional, or handle as game over)
         if self.rect.top < 0:
             self.rect.top = 0
             self.velocity = 0
-        # if self.rect.bottom > screen_height: # Game over if bird hits ground
-        #     self.rect.bottom = screen_height
-        #     self.velocity = 0
 
-
-    def flap(self):
-        if game_state == 'game_active': # Only allow flap if game is active
+    def flap(self, game_state):
+        # Access game_state via the passed parameter
+        if game_state == 'game_active':
             self.velocity = self.flap_strength
             sound_flap.play()
-            # sound_swoosh.play() # Optional: play swoosh on flap too
 
     def draw(self, surface):
         surface.blit(self.image, self.rect)
@@ -175,266 +276,521 @@ class Pipe(pygame.sprite.Sprite):
     def __init__(self, x, y, position, inverted=False):
         super().__init__()
         self.image = pipe_image
-        self.pipe_type = position # Store the pipe type (1 for top, -1 for bottom)
-        pipe_width = 52 # Default width if image not loaded
-        pipe_height = 320 # Default height if image not loaded
+        self.pipe_type = position
+        pipe_width = 52
+        pipe_height = 320
 
         if self.image is None:
             self.image = pygame.Surface([pipe_width, pipe_height])
-            self.image.fill((0, 255, 0)) # Green color for placeholder
+            self.image.fill((0, 255, 0))
         else:
-            # If using an image, you might want to get its dimensions
             pipe_width = self.image.get_width()
             pipe_height = self.image.get_height()
 
-        # Add a passed attribute for scoring
         self.passed = False
-
         self.rect = self.image.get_rect()
 
-        # Position can be 1 (top pipe) or -1 (bottom pipe)
-        if position == 1: # Top pipe
+        if position == 1:
             if inverted:
                  self.image = pygame.transform.flip(self.image, False, True)
             self.rect.bottomleft = (x, y - pipe_gap_size // 2)
-        elif position == -1: # Bottom pipe
-            if not inverted: # Standard bottom pipe, no flip needed from typical sprite
-                pass # image is already oriented correctly
+        elif position == -1:
+            if not inverted:
+                pass
             self.rect.topleft = (x, y + pipe_gap_size // 2)
 
-    def update(self):
-        self.rect.x -= pipe_move_speed # Move pipe to the left
+    def update(self, current_speed):
+        self.rect.x -= current_speed
         if self.rect.right < 0:
-            self.kill() # Remove pipe when it goes off screen
+            self.kill()
 
-# Game variables
-score = 0
-game_state = 'start_screen' # Initial state
-font = pygame.font.Font(None, 36) # Default font, size 36
-high_score = load_high_score() # Load high score at start
+# Coin class
+class Coin(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        
+        self.frames = coin_frames
+        self.frame_index = 0
+        self.animation_speed = 0.2
+        self.animation_timer = 0
 
-# Background scrolling variables
+        if self.frames:
+            self.image = self.frames[self.frame_index]
+            self.rect = self.image.get_rect(center=(x, y))
+        else:
+            self.image = pygame.Surface([coin_frame_width, coin_frame_height])
+            self.image.fill((255, 223, 0))
+            self.rect = self.image.get_rect(center=(x, y))
+
+    def update(self, current_speed):
+        if self.frames and len(self.frames) > 1:
+            self.animation_timer += self.animation_speed
+            if self.animation_timer >= 1:
+                self.frame_index = (self.frame_index + 1) % len(self.frames)
+                self.image = self.frames[self.frame_index]
+                self.animation_timer = 0
+
+        self.rect.x -= current_speed
+        if self.rect.right < 0:
+            self.kill()
+
+# Background scroll
 background_x = 0
-background_scroll_speed = 1 # Slower than pipes for parallax effect
 
-# Function to display score
 def display_score(state):
     if state == 'game_active':
-        score_surface = font.render(f'Score: {int(score)}', True, (255, 255, 255))
-        score_rect = score_surface.get_rect(center=(screen_width // 2, 50))
+        score_surface = font.render(str(int(score)), True, (255, 255, 255))
+        score_rect = score_surface.get_rect(center=(screen_width // 2, UI_PADDING + 20))
         screen.blit(score_surface, score_rect)
-    if state == 'game_over':
-        # Display game_over_image if loaded
-        if game_over_image:
-            game_over_rect = game_over_image.get_rect(center=(screen_width // 2, screen_height // 2 - 60)) # Adjusted Y
-            screen.blit(game_over_image, game_over_rect)
-        else: # Fallback text if image not loaded
-            game_over_text_surface = font.render('Game Over', True, (255, 0, 0))
-            game_over_text_rect = game_over_text_surface.get_rect(center=(screen_width // 2, screen_height // 2 - 50))
-            screen.blit(game_over_text_surface, game_over_text_rect)
-
-        # Display scores below the game over image/text
-        score_y_offset = screen_height // 2 + 0 # Adjusted Y
-        if game_over_image:
-            score_y_offset = game_over_rect.bottom + 30 # Position scores below the image
         
+        coin_surface = small_font.render(f'Coins: {coin_count}', True, (255, 255, 0))
+        coin_rect = coin_surface.get_rect(topleft=(UI_PADDING, UI_PADDING))
+        screen.blit(coin_surface, coin_rect)
+    
+    elif state == 'game_over':
+        if game_over_image:
+            game_over_rect = game_over_image.get_rect(center=(screen_width // 2, screen_height // 2 - 80))
+            screen.blit(game_over_image, game_over_rect)
+
         score_surface = font.render(f'Score: {int(score)}', True, (255, 255, 255))
-        score_rect = score_surface.get_rect(center=(screen_width // 2, score_y_offset))
+        score_rect = score_surface.get_rect(center=(screen_width // 2, screen_height // 2))
         screen.blit(score_surface, score_rect)
 
         high_score_surface = font.render(f'High Score: {int(high_score)}', True, (255, 255, 255))
-        high_score_rect = high_score_surface.get_rect(center=(screen_width // 2, score_y_offset + 40))
+        high_score_rect = high_score_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING))
         screen.blit(high_score_surface, high_score_rect)
 
         restart_surface = font.render('Press R to Restart', True, (255, 255, 255))
-        restart_rect = restart_surface.get_rect(center=(screen_width // 2, score_y_offset + 80))
+        restart_rect = restart_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING * 2))
         screen.blit(restart_surface, restart_rect)
-    if state == 'start_screen':
-        title_surface = font.render('Flappy Bird', True, (255, 255, 0)) # Yellow title
-        title_rect = title_surface.get_rect(center=(screen_width // 2, screen_height // 3))
-        screen.blit(title_surface, title_rect)
 
-        start_surface = font.render('Press Space to Start', True, (255, 255, 255))
-        start_rect = start_surface.get_rect(center=(screen_width // 2, screen_height // 2))
-        screen.blit(start_surface, start_rect)
-
-        high_score_display_surface = font.render(f'High Score: {int(high_score)}', True, (255, 255, 255))
-        high_score_display_rect = high_score_display_surface.get_rect(center=(screen_width // 2, screen_height // 2 + 50))
-        screen.blit(high_score_display_surface, high_score_display_rect)
-
-# Function to reset the game
-def reset_game():
-    global score, game_state, high_score
-    if score > high_score: 
-        high_score = score
-        save_high_score(high_score)
-    score = 0
-    bird.rect.center = (50, screen_height // 2)
-    bird.velocity = 0
-    pipes.empty()       # Clear existing pipes
-    all_sprites.empty() # Clear all sprites
-    all_sprites.add(bird) # Re-add bird
-    game_state = 'game_active' # Set state to active
-    create_pipe_pair() # Create initial pipes immediately for the new game
-    # Restart background music if the mixer is available
-    if 'pygame' in sys.modules and hasattr(pygame.mixer, 'music'):
-        pygame.mixer.music.play(-1) # Play music, looping indefinitely
-
-
-bird = Bird()
-pipes = pygame.sprite.Group()
-all_sprites = pygame.sprite.Group()
-all_sprites.add(bird)
-
-# Timer for spawning pipes
-PIPE_SPAWN_EVENT = pygame.USEREVENT
-pygame.time.set_timer(PIPE_SPAWN_EVENT, pipe_spawn_interval) # Use variable for spawn interval
-# pipe_gap = 150 # Gap between upper and lower pipe - Now using pipe_gap_size
-
-# Function to create a new pair of pipes
-def create_pipe_pair():
-    # Random y position for the pipe gap center
-    # Ensure pipe_gap_center is not too close to the top or bottom of the screen
-    min_y = 100  # Minimum height for the gap center from the top
-    max_y = screen_height - 100 - pipe_gap_size # Maximum height for the gap center from the top
-    if min_y >= max_y: # Fallback if screen is too small
-        pipe_gap_center_y = screen_height // 2
-    else:
-        pipe_gap_center_y = random.randint(min_y, max_y)
-
-    top_pipe = Pipe(screen_width, pipe_gap_center_y, 1, inverted=True) # Inverted for top pipe
-    bottom_pipe = Pipe(screen_width, pipe_gap_center_y, -1)
-    pipes.add(top_pipe)
-    pipes.add(bottom_pipe)
-    all_sprites.add(top_pipe)
-    all_sprites.add(bottom_pipe)
-
-# Game loop
-running = True
-while running:
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            running = False
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_SPACE:
-                if game_state == 'game_active':
-                    bird.flap()
-                elif game_state == 'start_screen':
-                    game_state = 'game_active' # Start the game
-                    sound_swoosh.play() # Play swoosh when starting game
-                    if 'pygame' in sys.modules and not pygame.mixer.music.get_busy(): # Check if music system available and not already playing
-                        pygame.mixer.music.play(-1) # Start background music
-                    score = 0 # Ensure score is 0 at start
-                    bird.rect.center = (50, screen_height // 2)
-                    bird.velocity = 0
-                    pipes.empty() # Clear any pipes if they somehow existed
-                    all_sprites.empty()
-                    all_sprites.add(bird)
-                    # Start pipe spawning by ensuring the first pair is created soon
-                    create_pipe_pair() # Create initial pipes immediately
-
-            if event.key == pygame.K_r and game_state == 'game_over':
-                reset_game()
-                sound_swoosh.play() # Play swoosh on restart
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if game_state == 'game_active':
-                bird.flap()
-            elif game_state == 'start_screen': # Also allow mouse click to start
-               game_state = 'game_active'
-               sound_swoosh.play()
-               if 'pygame' in sys.modules and not pygame.mixer.music.get_busy(): # Check if music system available and not already playing
-                   pygame.mixer.music.play(-1) # Start background music
-               score = 0
-               bird.rect.center = (50, screen_height // 2)
-               bird.velocity = 0
-               pipes.empty()
-               all_sprites.empty()
-               all_sprites.add(bird)
-               create_pipe_pair()
-
-        if event.type == PIPE_SPAWN_EVENT and game_state == 'game_active':
-            create_pipe_pair()
-
-    if game_state == 'game_active':
-        # Game logic updates will go here
-        all_sprites.update()
-
-        # Collision detection
-        if pygame.sprite.spritecollide(bird, pipes, False) or bird.rect.bottom >= screen_height or bird.rect.top <= 0:
-            game_state = 'game_over'
-            sound_hit.play()
-            sound_die.play() # Play die sound on game over
-            if 'pygame' in sys.modules: pygame.mixer.music.stop() # Stop background music abruptly
-            if score > high_score: # Check and save high score immediately on game over
-                high_score = score
-                save_high_score(high_score)
-
-        # Scoring
-        for pipe in pipes:
-            if not pipe.passed and pipe.rect.right < bird.rect.left:
-                pipe.passed = True
-                # Score 1 point if this is a bottom pipe (or any consistently chosen one from a pair)
-                if pipe.pipe_type == -1: # Check if it's a bottom pipe
-                    score += 1
-                    sound_point.play()
-
-        # Drawing code will go here
-        # screen.fill((135, 206, 235))  # Light blue sky color - replaced by background image
-
-        # Scroll and draw background
-        if background_image:
-            background_x -= background_scroll_speed
-            if background_x <= -screen_width:
-                background_x = 0
-            screen.blit(background_image, (background_x, 0))
-            screen.blit(background_image, (background_x + screen_width, 0))
-        else:
-            screen.fill((135, 206, 235)) # Fallback sky color
-
-        all_sprites.draw(screen)
-        display_score('game_active')
-
-    elif game_state == 'game_over': # Game Over state
-        screen.fill((0,0,0)) # Black screen for game over
-        display_score('game_over')
+        back_to_select_surface = font.render('Press B for Bird Select', True, (255, 255, 255))
+        back_to_select_rect = back_to_select_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING * 3))
+        screen.blit(back_to_select_surface, back_to_select_rect)
     
-    elif game_state == 'start_screen':
-        # Draw background for start screen
-        if background_image:
-            background_x -= background_scroll_speed
-            if background_x <= -screen_width:
-                background_x = 0
-            screen.blit(background_image, (background_x, 0))
-            screen.blit(background_image, (background_x + screen_width, 0))
-        else:
-            screen.fill((135, 206, 235)) # Fallback sky color
-        
-        # Display message.png if loaded
+    elif state == 'start_screen':
         if message_image:
             message_rect = message_image.get_rect(center=(screen_width // 2, screen_height // 2 - 50))
             screen.blit(message_image, message_rect)
-        else: # Fallback text if message_image not loaded
+        else:
             start_surface = font.render('Press Space to Start', True, (255, 255, 255))
             start_rect = start_surface.get_rect(center=(screen_width // 2, screen_height // 2))
             screen.blit(start_surface, start_rect)
 
-        # Bird can be displayed static on start screen
-        bird.draw(screen) # Draw the bird in its initial position
-        # display_score('start_screen') # Original call, might be redundant if message_image covers it
-
-        # Display high score on start screen below the message image or text
         high_score_display_surface = font.render(f'High Score: {int(high_score)}', True, (255, 255, 255))
-        # Adjust Y position based on whether message_image is present
-        if message_image:
-            high_score_y_offset = message_rect.bottom + 30
-        else:
-            high_score_y_offset = screen_height // 2 + 50
-        high_score_display_rect = high_score_display_surface.get_rect(center=(screen_width // 2, high_score_y_offset))
+        high_score_display_rect = high_score_display_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING))
         screen.blit(high_score_display_surface, high_score_display_rect)
+    
+    elif state == 'bird_select':
+        overlay = pygame.Surface((screen_width, screen_height))
+        overlay.fill((0, 0, 0))
+        overlay.set_alpha(128)
+        screen.blit(overlay, (0, 0))
 
+        title_surface = font.render('Select Bird', True, (255, 255, 0))
+        title_rect = title_surface.get_rect(center=(screen_width // 2, UI_PADDING + 20))
+        screen.blit(title_surface, title_rect)
 
-    pygame.display.flip()  # Update the full display
-    clock.tick(60)  # Limit to 60 FPS
+        y_offset = UI_PADDING + 80
+        available_birds = bird_manager.get_available_birds()
+        for i, bird_type in enumerate(available_birds):
+            box_height = 60
+            box_rect = pygame.Rect(UI_PADDING, y_offset + i * (box_height + 10) - (box_height // 2), screen_width - UI_PADDING * 2, box_height)
+            if bird_type == selected_bird_type:
+                pygame.draw.rect(screen, (255, 255, 0), box_rect, 2)
+            else:
+                pygame.draw.rect(screen, (255, 255, 255), box_rect, 1)
 
-pygame.quit()
-sys.exit() 
+            text_y_name = y_offset + i * (box_height + 10) - 10
+            text_y_desc = y_offset + i * (box_height + 10) + 10
+
+            if bird_manager.is_bird_unlocked(bird_type):
+                bird_text = f"{bird_type.capitalize()} Bird"
+                if bird_type == selected_bird_type:
+                    bird_text += " ✓"
+                bird_surface = small_font.render(bird_text, True, (255, 255, 255))
+                bird_rect = bird_surface.get_rect(center=(screen_width // 2, text_y_name))
+                screen.blit(bird_surface, bird_rect)
+
+                achievement_info = bird_manager.get_bird_achievement_info(bird_type)
+                if achievement_info and 'description' in achievement_info:
+                    desc_surface = small_font.render(achievement_info['description'], True, (180, 180, 180))
+                    desc_rect = desc_surface.get_rect(center=(screen_width // 2, text_y_desc))
+                    screen.blit(desc_surface, desc_rect)
+            else:
+                achievement = bird_manager.get_bird_achievement_info(bird_type)
+                if achievement:
+                    lock_text = f"Locked: {achievement['description']}"
+                    lock_surface = small_font.render(lock_text, True, (128, 128, 128))
+                    lock_rect = lock_surface.get_rect(center=(screen_width // 2, text_y_name))
+                    screen.blit(lock_surface, lock_rect)
+
+        preview_bird = Bird(selected_bird_type)
+        preview_bird.rect.center = (screen_width // 2, screen_height - 100)
+        preview_bird.draw(screen)
+
+        nav_surface = small_font.render('↑↓ to select, Space to choose', True, (200, 200, 200))
+        nav_rect = nav_surface.get_rect(center=(screen_width // 2, screen_height - UI_PADDING - 30))
+        screen.blit(nav_surface, nav_rect)
+
+        select_surface = small_font.render('Click to Play', True, (255, 255, 255))
+        select_rect = select_surface.get_rect(center=(screen_width // 2, screen_height - UI_PADDING))
+        screen.blit(select_surface, select_rect)
+
+# --- Game Class Refactor with Difficulty Modifier ---
+class Game:
+    def __init__(self):
+        # Game state variables
+        self.game_state = 'start_screen'
+        self.selected_bird_type = 'blue'
+        self.score = 0
+        self.high_score = self.load_high_score()
+        self.coin_count = 0
+        self.pipes_passed_count = 0
+        self.pipe_move_speed = 2.0 # Initial pipe move speed (use float for percentage increase)
+        self.pipe_spawn_interval = 1800 # Move pipe_spawn_interval to the class
+
+        # Game objects and groups
+        self.bird_manager = BirdManager()
+        self.bird = Bird(self.selected_bird_type)
+        self.pipes = pygame.sprite.Group()
+        self.coins = pygame.sprite.Group()
+        self.all_sprites = pygame.sprite.Group()
+        self.all_sprites.add(self.bird)
+
+        # Background scroll
+        self.background_x = 0
+
+    def load_high_score(self):
+        try:
+            with open(high_score_file, 'r') as f:
+                score_val = int(f.read())
+                return score_val
+        except (IOError, ValueError):
+            return 0
+
+    def save_high_score(self):
+        try:
+            with open(high_score_file, 'w') as f:
+                f.write(str(int(self.high_score)))
+        except IOError:
+            print("Error saving high score")
+
+    def display_score(self):
+        if self.game_state == 'game_active':
+            score_surface = font.render(str(int(self.score)), True, (255, 255, 255))
+            score_rect = score_surface.get_rect(center=(screen_width // 2, UI_PADDING + 20))
+            screen.blit(score_surface, score_rect)
+            
+            coin_surface = small_font.render(f'Coins: {self.coin_count}', True, (255, 255, 0))
+            coin_rect = coin_surface.get_rect(topleft=(UI_PADDING, UI_PADDING))
+            screen.blit(coin_surface, coin_rect)
+        
+        elif self.game_state == 'game_over':
+            if game_over_image:
+                game_over_rect = game_over_image.get_rect(center=(screen_width // 2, screen_height // 2 - 80))
+                screen.blit(game_over_image, game_over_rect)
+
+            score_surface = font.render(f'Score: {int(self.score)}', True, (255, 255, 255))
+            score_rect = score_surface.get_rect(center=(screen_width // 2, screen_height // 2))
+            screen.blit(score_surface, score_rect)
+
+            high_score_surface = font.render(f'High Score: {int(self.high_score)}', True, (255, 255, 255))
+            high_score_rect = high_score_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING))
+            screen.blit(high_score_surface, high_score_rect)
+
+            restart_surface = font.render('Press R to Restart', True, (255, 255, 255))
+            restart_rect = restart_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING * 2))
+            screen.blit(restart_surface, restart_rect)
+
+            back_to_select_surface = font.render('Press B for Bird Select', True, (255, 255, 255))
+            back_to_select_rect = back_to_select_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING * 3))
+            screen.blit(back_to_select_surface, back_to_select_rect)
+        
+        elif self.game_state == 'start_screen':
+            if message_image:
+                message_rect = message_image.get_rect(center=(screen_width // 2, screen_height // 2 - 50))
+                screen.blit(message_image, message_rect)
+            else:
+                start_surface = font.render('Press Space to Start', True, (255, 255, 255))
+                start_rect = start_surface.get_rect(center=(screen_width // 2, screen_height // 2))
+                screen.blit(start_surface, start_rect)
+
+            high_score_display_surface = font.render(f'High Score: {int(self.high_score)}', True, (255, 255, 255))
+            high_score_display_rect = high_score_display_surface.get_rect(center=(screen_width // 2, screen_height // 2 + UI_SPACING))
+            screen.blit(high_score_display_surface, high_score_display_rect)
+        
+        elif self.game_state == 'bird_select':
+            overlay = pygame.Surface((screen_width, screen_height))
+            overlay.fill((0, 0, 0))
+            overlay.set_alpha(128)
+            screen.blit(overlay, (0, 0))
+
+            title_surface = font.render('Select Bird', True, (255, 255, 0))
+            title_rect = title_surface.get_rect(center=(screen_width // 2, UI_PADDING + 20))
+            screen.blit(title_surface, title_rect)
+
+            y_offset = UI_PADDING + 80
+            available_birds = self.bird_manager.get_available_birds()
+            for i, bird_type in enumerate(available_birds):
+                box_height = 60
+                box_rect = pygame.Rect(UI_PADDING, y_offset + i * (box_height + 10) - (box_height // 2), screen_width - UI_PADDING * 2, box_height)
+                if bird_type == self.selected_bird_type:
+                    pygame.draw.rect(screen, (255, 255, 0), box_rect, 2)
+                else:
+                    pygame.draw.rect(screen, (255, 255, 255), box_rect, 1)
+
+                text_y_name = y_offset + i * (box_height + 10) - 10
+                text_y_desc = y_offset + i * (box_height + 10) + 10
+
+                if self.bird_manager.is_bird_unlocked(bird_type):
+                    bird_text = f"{bird_type.capitalize()} Bird"
+                    if bird_type == self.selected_bird_type:
+                        bird_text += " ✓"
+                    bird_surface = small_font.render(bird_text, True, (255, 255, 255))
+                    bird_rect = bird_surface.get_rect(center=(screen_width // 2, text_y_name))
+                    screen.blit(bird_surface, bird_rect)
+
+                    achievement_info = self.bird_manager.get_bird_achievement_info(bird_type)
+                    if achievement_info and 'description' in achievement_info:
+                        desc_surface = small_font.render(achievement_info['description'], True, (180, 180, 180))
+                        desc_rect = desc_surface.get_rect(center=(screen_width // 2, text_y_desc))
+                        screen.blit(desc_surface, desc_rect)
+                else:
+                    achievement = self.bird_manager.get_bird_achievement_info(bird_type)
+                    if achievement:
+                        lock_text = f"Locked: {achievement['description']}"
+                        lock_surface = small_font.render(lock_text, True, (128, 128, 128))
+                        lock_rect = lock_surface.get_rect(center=(screen_width // 2, text_y_name))
+                        screen.blit(lock_surface, lock_rect)
+
+            preview_bird = Bird(self.selected_bird_type)
+            preview_bird.rect.center = (screen_width // 2, screen_height - 100)
+            preview_bird.draw(screen)
+
+            nav_surface = small_font.render('↑↓ to select, Space to choose', True, (200, 200, 200))
+            nav_rect = nav_surface.get_rect(center=(screen_width // 2, screen_height - UI_PADDING - 30))
+            screen.blit(nav_surface, nav_rect)
+
+            select_surface = small_font.render('Click to Play', True, (255, 255, 255))
+            select_rect = select_surface.get_rect(center=(screen_width // 2, screen_height - UI_PADDING))
+            screen.blit(select_surface, select_rect)
+
+    def reset_game(self):
+        if self.score > self.high_score:
+            self.high_score = self.score
+            self.save_high_score()
+            self.bird_manager.update_score(self.selected_bird_type, self.score)
+        
+        self.score = 0
+        self.coin_count = 0
+        self.pipes_passed_count = 0
+        self.pipe_move_speed = 2.0 # Reset pipe speed
+        self.pipe_spawn_interval = 1800 # Reset pipe_spawn_interval
+        self.bird = Bird(self.selected_bird_type)
+        self.bird.rect.center = (50, screen_height // 2)
+        self.bird.velocity = 0
+        self.pipes.empty()
+        self.coins.empty()
+        self.all_sprites.empty()
+        self.all_sprites.add(self.bird)
+        self.game_state = 'game_active'
+        self.create_pipe_pair()
+        
+        if 'pygame' in sys.modules and hasattr(pygame.mixer, 'music'):
+            pygame.mixer.music.play(-1)
+
+    def create_pipe_pair(self):
+        min_y = 100
+        max_y = screen_height - 100 - pipe_gap_size
+        if min_y >= max_y:
+            pipe_gap_center_y = screen_height // 2
+        else:
+            pipe_gap_center_y = random.randint(min_y, max_y)
+
+        if pipe_image:
+            current_pipe_width = pipe_image.get_width()
+        else:
+            current_pipe_width = 52
+
+        top_pipe = Pipe(screen_width, pipe_gap_center_y, 1, inverted=True)
+        bottom_pipe = Pipe(screen_width, pipe_gap_center_y, -1)
+        self.pipes.add(top_pipe)
+        self.pipes.add(bottom_pipe)
+        self.all_sprites.add(top_pipe)
+        self.all_sprites.add(bottom_pipe)
+
+        if random.random() < 0.5:
+            coin_x = screen_width + current_pipe_width + 20
+            coin_y = pipe_gap_center_y
+            coin = Coin(coin_x, coin_y)
+            self.coins.add(coin)
+            self.all_sprites.add(coin)
+
+    def run(self):
+        running = True
+        pygame.time.set_timer(PIPE_SPAWN_EVENT, self.pipe_spawn_interval)
+
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        if self.game_state == 'start_screen':
+                            self.game_state = 'bird_select'
+                        elif self.game_state == 'bird_select':
+                            self.game_state = 'game_active'
+                            sound_swoosh.play()
+                            if 'pygame' in sys.modules and hasattr(pygame.mixer, 'music') and not pygame.mixer.music.get_busy():
+                                pygame.mixer.music.play(-1)
+                            self.score = 0
+                            self.coin_count = 0
+                            self.pipes.empty()
+                            self.coins.empty()
+                            self.bird = Bird(self.selected_bird_type)
+                            self.bird.rect.center = (50, screen_height // 2)
+                            self.bird.velocity = 0
+                            self.all_sprites.empty()
+                            self.all_sprites.add(self.bird)
+                            self.create_pipe_pair()
+                        elif self.game_state == 'game_active':
+                            self.bird.flap(self.game_state)
+                    elif event.key == pygame.K_r and self.game_state == 'game_over':
+                        self.reset_game()
+                        sound_swoosh.play()
+                    elif event.key == pygame.K_b and self.game_state == 'game_over':
+                        self.game_state = 'bird_select'
+                        self.bird = Bird(self.selected_bird_type)
+                        self.bird.rect.center = (screen_width // 2, screen_height // 2)
+                    elif self.game_state == 'bird_select':
+                        available_birds = self.bird_manager.get_available_birds()
+                        current_index = available_birds.index(self.selected_bird_type)
+                        if event.key == pygame.K_UP:
+                            self.selected_bird_type = available_birds[(current_index - 1) % len(available_birds)]
+                        elif event.key == pygame.K_DOWN:
+                            self.selected_bird_type = available_birds[(current_index + 1) % len(available_birds)]
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    if self.game_state == 'game_active':
+                        self.bird.flap(self.game_state)
+                    elif self.game_state == 'start_screen':
+                         self.game_state = 'bird_select'
+                    elif self.game_state == 'bird_select':
+                        mouse_pos = pygame.mouse.get_pos()
+                        y_offset_start = UI_PADDING + 80
+                        box_height = 60
+                        available_birds = self.bird_manager.get_available_birds()
+                        for i, bird_type in enumerate(available_birds):
+                            box_y_start = y_offset_start + i * (box_height + 10) - (box_height // 2)
+                            box_y_end = box_y_start + box_height
+                            if self.bird_manager.is_bird_unlocked(bird_type):
+                                if box_y_start <= mouse_pos[1] <= box_y_end:
+                                    self.selected_bird_type = bird_type
+                                    self.game_state = 'game_active'
+                                    sound_swoosh.play()
+                                    if 'pygame' in sys.modules and hasattr(pygame.mixer, 'music') and not pygame.mixer.music.get_busy():
+                                        pygame.mixer.music.play(-1)
+                                    self.score = 0
+                                    self.coin_count = 0
+                                    self.pipes.empty()
+                                    self.coins.empty()
+                                    self.bird = Bird(self.selected_bird_type)
+                                    self.bird.rect.center = (50, screen_height // 2)
+                                    self.bird.velocity = 0
+                                    self.all_sprites.empty()
+                                    self.all_sprites.add(self.bird)
+                                    self.create_pipe_pair()
+                                    break
+
+                if event.type == PIPE_SPAWN_EVENT and self.game_state == 'game_active':
+                    self.create_pipe_pair()
+
+            if self.game_state == 'game_active':
+                self.pipes.update(self.pipe_move_speed)
+                self.coins.update(self.pipe_move_speed)
+                self.bird.update()
+
+                collected_coins = pygame.sprite.spritecollide(self.bird, self.coins, True)
+                self.coin_count += len(collected_coins)
+                if len(collected_coins) > 0:
+                    sound_point.play()
+
+                if pygame.sprite.spritecollide(self.bird, self.pipes, False) or self.bird.rect.bottom >= screen_height or self.bird.rect.top <= 0:
+                    self.game_state = 'game_over'
+                    sound_hit.play()
+                    sound_die.play()
+                    if 'pygame' in sys.modules and hasattr(pygame.mixer, 'music'):
+                        pygame.mixer.music.stop()
+                    if self.score > self.high_score:
+                        self.high_score = self.score
+                        self.save_high_score()
+                        self.bird_manager.update_score(self.selected_bird_type, self.score)
+
+                for pipe in self.pipes:
+                    if not pipe.passed and pipe.rect.right < self.bird.rect.left:
+                        pipe.passed = True
+                        if pipe.pipe_type == -1:
+                            self.score += 1
+                            self.pipes_passed_count += 1
+                            if self.pipes_passed_count > 0 and self.pipes_passed_count % 20 == 0:
+                                self.pipe_move_speed *= 1.05
+                                print(f"Pipe speed increased to: {self.pipe_move_speed}")
+
+                if background_image:
+                    self.background_x -= background_scroll_speed
+                    if self.background_x <= -screen_width:
+                        self.background_x = 0
+                    screen.blit(background_image, (self.background_x, 0))
+                    screen.blit(background_image, (self.background_x + screen_width, 0))
+                else:
+                    screen.fill((135, 206, 235))
+
+                self.all_sprites.draw(screen)
+                self.display_score()
+
+            elif self.game_state == 'game_over':
+                screen.fill((0, 0, 0))
+                self.pipes.update(self.pipe_move_speed)
+                self.coins.update(self.pipe_move_speed)
+                self.display_score()
+            
+            elif self.game_state == 'start_screen':
+                if background_image:
+                    self.background_x -= background_scroll_speed
+                    if self.background_x <= -screen_width:
+                        self.background_x = 0
+                    screen.blit(background_image, (self.background_x, 0))
+                    screen.blit(background_image, (self.background_x + screen_width, 0))
+                else:
+                    screen.fill((135, 206, 235))
+                
+                if hasattr(self, 'bird'):
+                    self.bird.draw(screen)
+                self.display_score()
+
+            elif self.game_state == 'bird_select':
+                if background_image:
+                    self.background_x -= background_scroll_speed
+                    if self.background_x <= -screen_width:
+                        self.background_x = 0
+                    screen.blit(background_image, (self.background_x, 0))
+                    screen.blit(background_image, (self.background_x + screen_width, 0))
+                else:
+                    screen.fill((135, 206, 235))
+                
+                self.display_score()
+
+                preview_bird = Bird(self.selected_bird_type)
+                preview_bird.rect.center = (screen_width // 2, screen_height - 100)
+                preview_bird.draw(screen)
+
+            pygame.display.flip()
+            clock.tick(60)
+
+        pygame.quit()
+        sys.exit()
+
+# Run the game
+if __name__ == '__main__':
+    game = Game()
+    game.run() 
